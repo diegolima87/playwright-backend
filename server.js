@@ -37,9 +37,10 @@ app.post("/generate-pdf", async (req, res) => {
   waitUntil: "domcontentloaded",
   timeout: 60000,
 });
-    await page.fill('input[name="user_session[login]"]', username);
-    await page.fill('input[name="user_session[password]"]', password);
-    await page.click('input[type="submit"], button[type="submit"]');
+   // PARA (tente):
+await page.fill('input[type="email"], input[name="email"], #email', username);
+await page.fill('input[type="password"], #password', password);
+await page.click('button[type="submit"], input[type="submit"]');
     await page.waitForNavigation({ waitUntil: "networkidle" }).catch(() => {});
 
     // Check login success
