@@ -38,10 +38,22 @@ app.post("/generate-pdf", async (req, res) => {
       timeout: 60000,
     });
 
-    // Seletores flexíveis para o formulário de login
-    await page.locator('input[type="email"], input[name*="login"], input[id*="login"]').first().fill(username);
-    await page.locator('input[type="password"]').first().fill(password);
-    await page.locator('button[type="submit"], input[type="submit"]').first().click();
+    // Wait for page to be interactive
+    await page.waitForTimeout(3000);
+
+    // Use flexible selectors
+    const emailInput = page.locator('input[type="email"], input[name*="login"], input[id*="login"], input[name*="email"]').first();
+    await emailInput.waitFor({ state: "visible", timeout: 60000 });
+    await emailInput.fill(username);
+
+    const passwordInput = page.locator('input[type="password"]').first();
+    await passwordInput.waitFor({ state: "visible", timeout: 60000 });
+    await passwordInput.fill(password);
+
+    const submitButton = page.locator('input[type="submit"], button[type="submit"]').first();
+    await submitButton.waitFor({ state: "visible", timeout: 60000 });
+    await submitButton.click();
+
     await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
 
     // Check login success
@@ -54,7 +66,7 @@ app.post("/generate-pdf", async (req, res) => {
     }
     send({ type: "log", message: "✓ Login realizado com sucesso!", level: "success" });
 
-    // Navegar para a URL alvo (NÃO para a página de login!)
+    // Navigate to target URL (NOT login page again!)
     send({ type: "log", message: "Navegando para a URL das questões...", level: "pending" });
     await page.goto(targetUrl, {
       waitUntil: "domcontentloaded",
@@ -67,11 +79,9 @@ app.post("/generate-pdf", async (req, res) => {
     while (true) {
       send({ type: "log", message: `Processando página ${currentPage}...`, level: "pending" });
 
-      // Click the print/PDF icon
       const printButton = await page.$('a[href*="print"], .q-question-options a[title*="Imprimir"], a.print-link, [data-action="print"]');
 
       if (printButton) {
-        // Open print version in new tab
         const [printPage] = await Promise.all([
           context.waitForEvent("page"),
           printButton.click(),
@@ -80,10 +90,7 @@ app.post("/generate-pdf", async (req, res) => {
           if (href) {
             const printPageDirect = await context.newPage();
             const fullUrl = href.startsWith("http") ? href : `https://www.qconcursos.com${href}`;
-            await printPageDirect.goto(fullUrl, {
-              waitUntil: "domcontentloaded",
-              timeout: 60000,
-            });
+            await printPageDirect.goto(fullUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
             return [printPageDirect];
           }
           return [null];
@@ -144,7 +151,6 @@ app.post("/generate-pdf", async (req, res) => {
 
       send({ type: "progress", value: Math.min(95, currentPage * 5) });
 
-      // Check for next page
       const nextButton = await page.$('a[rel="next"], .pagination a:has-text("Próxima"), .pagination .next a');
       if (!nextButton) {
         send({ type: "log", message: "Última página alcançada.", level: "info" });
