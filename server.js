@@ -34,14 +34,15 @@ app.post("/generate-pdf", async (req, res) => {
     // Login
     send({ type: "log", message: "Acessando página de login...", level: "pending" });
     await page.goto("https://www.qconcursos.com/usuario/entrar", {
-  waitUntil: "domcontentloaded",
-  timeout: 60000,
-});
-   // PARA (tente):
-await page.fill('input[type="email"], input[name="email"], #email', username);
-await page.fill('input[type="password"], #password', password);
-await page.click('button[type="submit"], input[type="submit"]');
-    await page.waitForNavigation({ waitUntil: "networkidle" }).catch(() => {});
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+
+    // Seletores flexíveis para o formulário de login
+    await page.locator('input[type="email"], input[name*="login"], input[id*="login"]').first().fill(username);
+    await page.locator('input[type="password"]').first().fill(password);
+    await page.locator('button[type="submit"], input[type="submit"]').first().click();
+    await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
 
     // Check login success
     const loginFailed = await page.$('.flash-message--error, .alert-danger');
@@ -53,13 +54,12 @@ await page.click('button[type="submit"], input[type="submit"]');
     }
     send({ type: "log", message: "✓ Login realizado com sucesso!", level: "success" });
 
-    // Navigate to first page of questions
+    // Navegar para a URL alvo (NÃO para a página de login!)
     send({ type: "log", message: "Navegando para a URL das questões...", level: "pending" });
-    await page.goto("https://www.qconcursos.com/usuario/entrar", {
-  waitUntil: "domcontentloaded",
-  timeout: 60000,
-});
-
+    await page.goto(targetUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
 
     let currentPage = 1;
     let totalPdfs = 0;
@@ -69,35 +69,35 @@ await page.click('button[type="submit"], input[type="submit"]');
 
       // Click the print/PDF icon
       const printButton = await page.$('a[href*="print"], .q-question-options a[title*="Imprimir"], a.print-link, [data-action="print"]');
-      
+
       if (printButton) {
         // Open print version in new tab
         const [printPage] = await Promise.all([
           context.waitForEvent("page"),
           printButton.click(),
         ]).catch(async () => {
-          // If no new tab, try navigating directly
           const href = await printButton.getAttribute("href");
           if (href) {
             const printPageDirect = await context.newPage();
             const fullUrl = href.startsWith("http") ? href : `https://www.qconcursos.com${href}`;
-            await printPageDirect.goto(fullUrl, { waitUntil: "networkidle" });
+            await printPageDirect.goto(fullUrl, {
+              waitUntil: "domcontentloaded",
+              timeout: 60000,
+            });
             return [printPageDirect];
           }
           return [null];
         });
 
         if (printPage) {
-          await printPage.waitForLoadState("networkidle");
-          
-          // Generate PDF from the print page
+          await printPage.waitForLoadState("domcontentloaded");
+
           const pdfBuffer = await printPage.pdf({
             format: "A4",
             printBackground: true,
             margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" },
           });
 
-          // Upload to Supabase Storage
           const filename = `pagina_${currentPage}_${new Date().toISOString().slice(0, 10)}.pdf`;
           const storagePath = `${userId}/${jobId}/${filename}`;
 
@@ -119,8 +119,7 @@ await page.click('button[type="submit"], input[type="submit"]');
         }
       } else {
         send({ type: "log", message: `Página ${currentPage}: ícone de impressão não encontrado, usando captura direta.`, level: "info" });
-        
-        // Fallback: capture the page directly
+
         const pdfBuffer = await page.pdf({
           format: "A4",
           printBackground: true,
@@ -143,23 +142,20 @@ await page.click('button[type="submit"], input[type="submit"]');
         }
       }
 
-      // Calculate progress (estimate based on pages processed)
       send({ type: "progress", value: Math.min(95, currentPage * 5) });
 
-      // Check for next page button
+      // Check for next page
       const nextButton = await page.$('a[rel="next"], .pagination a:has-text("Próxima"), .pagination .next a');
       if (!nextButton) {
         send({ type: "log", message: "Última página alcançada.", level: "info" });
         break;
       }
 
-      // Navigate to next page
       await nextButton.click();
-      await page.waitForLoadState("networkidle");
+      await page.waitForLoadState("domcontentloaded");
       currentPage++;
     }
 
-    // Update job as completed
     const storagePath = `${userId}/${jobId}/`;
     await supabase.from("pdf_jobs")
       .update({ status: "completed", storage_path: storagePath, filename: `${totalPdfs}_paginas.pdf` })
