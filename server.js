@@ -33,7 +33,10 @@ app.post("/generate-pdf", async (req, res) => {
 
     // Login
     send({ type: "log", message: "Acessando página de login...", level: "pending" });
-    await page.goto("https://www.qconcursos.com/usuario/entrar", { waitUntil: "networkidle" });
+    await page.goto("https://www.qconcursos.com/usuario/entrar", {
+  waitUntil: "domcontentloaded",
+  timeout: 60000,
+});
     await page.fill('input[name="user_session[login]"]', username);
     await page.fill('input[name="user_session[password]"]', password);
     await page.click('input[type="submit"], button[type="submit"]');
