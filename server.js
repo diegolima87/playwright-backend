@@ -54,7 +54,11 @@ app.post("/generate-pdf", async (req, res) => {
 
     // Navigate to first page of questions
     send({ type: "log", message: "Navegando para a URL das questões...", level: "pending" });
-    await page.goto(targetUrl, { waitUntil: "networkidle" });
+    await page.goto("https://www.qconcursos.com/usuario/entrar", {
+  waitUntil: "domcontentloaded",
+  timeout: 60000,
+});
+
 
     let currentPage = 1;
     let totalPdfs = 0;
