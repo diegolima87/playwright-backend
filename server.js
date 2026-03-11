@@ -1,7 +1,6 @@
-// server.js v5.2 — Playwright PDF Backend (Render)
-import express from "express";
-import { chromium } from "playwright";
-import { createClient } from "@supabase/supabase-js";
+const express = require("express");
+const { chromium } = require("playwright");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(express.json());
@@ -9,16 +8,17 @@ app.use(express.json());
 let browserInstance = null;
 
 async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) return browserInstance;
-  browserInstance = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+  if (!browserInstance || !browserInstance.isConnected()) {
+    browserInstance = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    });
+  }
   return browserInstance;
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", version: "5.2", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: "5.3", timestamp: new Date().toISOString() });
 });
 
 app.post("/generate-pdf", async (req, res) => {
@@ -28,8 +28,6 @@ app.post("/generate-pdf", async (req, res) => {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
   // SSE headers
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -37,32 +35,42 @@ app.post("/generate-pdf", async (req, res) => {
     Connection: "keep-alive",
   });
 
-  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
-  const log = (message, level = "pending") => send({ type: "log", message, level });
+  const sendLog = (msg) => {
+    res.write(`data: ${JSON.stringify({ log: msg })}\n\n`);
+  };
 
+  const sendError = (msg) => {
+    res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
+    res.end();
+  };
+
+  const supabase = createClient(supabaseUrl, supabaseServiceKey);
   let context = null;
 
   try {
+    sendLog("Iniciando geração de PDFs...");
+
     const browser = await getBrowser();
     context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     });
-
     const page = await context.newPage();
 
     // Block heavy resources during navigation
     await page.route("**/*", (route) => {
       const type = route.request().resourceType();
-      if (["image", "font", "media"].includes(type)) return route.abort();
+      if (["image", "font", "media", "stylesheet"].includes(type)) {
+        return route.abort();
+      }
       return route.continue();
     });
 
-    log("Navegador pronto.");
+    sendLog("Navegador pronto.");
+    sendLog("Fazendo login...");
 
-    // === LOGIN ===
-    log("Fazendo login...");
+    // Navigate to login page
     await page.goto("https://www.qconcursos.com/conta/entrar", {
       waitUntil: "domcontentloaded",
       timeout: 60000,
@@ -71,48 +79,59 @@ app.post("/generate-pdf", async (req, res) => {
     // Dismiss cookie banners
     try {
       const cookieBtn = page.locator(
-        'button:has-text("Aceitar"), button:has-text("Concordo"), button:has-text("OK"), .js-cookies-agreement button'
+        'button:has-text("Aceitar"), button:has-text("OK"), button:has-text("Concordo"), [id*="cookie"] button, [class*="cookie"] button'
       );
-      await cookieBtn.first().click({ timeout: 3000 }).catch(() => {});
-    } catch {}
+      await cookieBtn.first().click({ timeout: 3000 });
+    } catch (_) {
+      // No cookie banner, continue
+    }
 
-    // Wait for login form
-    await page.locator("#login_email").waitFor({ state: "visible", timeout: 60000 });
+    // Fill login form
+    await page.waitForSelector("#login_email", { state: "visible", timeout: 60000 });
+    await page.fill("#login_email", username);
+    await page.fill("#login_password", password);
 
-    await page.fill("#login_email", username, { timeout: 10000 });
-    await page.fill("#login_password", password, { timeout: 10000 });
-    await page.click("#btnLogin", { timeout: 10000 });
+    // Click login and wait for navigation
+    await Promise.all([
+      page.waitForURL("**/usuario**", { timeout: 30000, waitUntil: "domcontentloaded" }),
+      page.click("#btnLogin", { noWaitAfter: true }),
+    ]);
 
-    // Wait for navigation after login
-    await page.waitForURL((url) => !url.href.includes("/conta/entrar"), { timeout: 30000 });
-    log("Login OK!");
+    // Validate login success
+    const currentUrl = page.url();
+    if (currentUrl.includes("/conta/entrar")) {
+      throw new Error("Login failed - still on login page. Check credentials.");
+    }
 
-    // === NAVIGATE TO TARGET ===
-    log("Carregando página alvo...");
+    sendLog("Login OK!");
+    sendLog("Carregando página alvo...");
 
-    // Unblock all resources for PDF
+    // Navigate to target URL
+    await page.goto(targetUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+
+    // Wait for content to render
+    await page.waitForTimeout(3000);
+
+    sendLog("Gerando PDF...");
+
+    // Unblock resources for PDF rendering
     await page.unroute("**/*");
 
-    await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 60000 });
-
-    // === GENERATE PDF ===
-    log("Gerando PDF...");
-    send({ type: "progress", value: 50 });
-
+    // Generate PDF
     const pdfBuffer = await page.pdf({
       format: "A4",
       printBackground: true,
-      margin: { top: "15mm", bottom: "15mm", left: "10mm", right: "10mm" },
+      margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" },
     });
 
-    const sizeKB = Math.round(pdfBuffer.length / 1024);
-    log(`PDF gerado (${sizeKB} KB). Enviando para storage...`);
-    send({ type: "progress", value: 75 });
+    const fileSizeKB = Math.round(pdfBuffer.length / 1024);
+    sendLog(`PDF gerado (${fileSizeKB} KB). Enviando para storage...`);
 
-    // === UPLOAD TO SUPABASE STORAGE ===
-    const filename = `questoes_${new Date().toISOString().slice(0, 10)}.pdf`;
-    const storagePath = `${userId}/${jobId}/${filename}`;
-
+    // Upload to Supabase Storage
+    const storagePath = `${userId}/${jobId}.pdf`;
     const { error: uploadError } = await supabase.storage
       .from("pdfs")
       .upload(storagePath, pdfBuffer, {
@@ -128,29 +147,35 @@ app.post("/generate-pdf", async (req, res) => {
     await supabase
       .from("pdf_jobs")
       .update({
-        status: "completed",
+        status: "done",
         storage_path: storagePath,
-        filename,
       })
       .eq("id", jobId);
 
-    send({ type: "progress", value: 100 });
-    send({ type: "complete", jobId, totalPages: 1, filename });
-  } catch (err) {
-    console.error("Generation error:", err);
-    log(`Erro: ${err.message}`, "error");
-    send({ type: "error", message: err.message });
-
-    await supabase
-      .from("pdf_jobs")
-      .update({ status: "failed", error_message: err.message })
-      .eq("id", jobId)
-      .catch(() => {});
-  } finally {
-    if (context) await context.close().catch(() => {});
+    sendLog("Upload concluído! PDF disponível para download.");
+    res.write(`data: ${JSON.stringify({ done: true, storagePath })}\n\n`);
     res.end();
+  } catch (err) {
+    console.error("Error:", err.message);
+    sendError(err.message || String(err));
+
+    // Update job as failed
+    try {
+      await supabase
+        .from("pdf_jobs")
+        .update({ status: "failed", error_message: err.message || String(err) })
+        .eq("id", jobId);
+    } catch (_) {
+      // Ignore update error
+    }
+  } finally {
+    if (context) {
+      await context.close().catch(() => {});
+    }
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server v5.2 running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT} (v5.3)`);
+});
