@@ -3,7 +3,7 @@ const { chromium } = require("playwright");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-app.use(express.json()); 
+app.use(express.json());
 
 // 🚀 Browser persistente — elimina ~3-5s de launch por request
 let browserInstance = null;
