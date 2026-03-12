@@ -1,9 +1,11 @@
-FROM mcr.microsoft.com/playwright:v1.52.0-noble
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
+
+RUN npx playwright install chromium --with-deps
 
 COPY . .
 
