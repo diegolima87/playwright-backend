@@ -1,4 +1,4 @@
-// server.js v8.0 — Playwright PDF + Question Import Backend
+// server.js v8.1 — Playwright PDF + Question Import Backend
 const express = require("express");
 const { chromium } = require("playwright");
 const { createClient } = require("@supabase/supabase-js");
@@ -7,7 +7,7 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const VERSION = "8.0.0";
+const VERSION = "8.1.0";
 
 // ── Health endpoint ─────────────────────────────────────────────
 app.get("/health", (_req, res) => {
@@ -37,6 +37,42 @@ function buildPageUrl(baseUrl, pageNum) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── Playwright launcher fix for Render/Docker ───────────────────
+async function launchChromium() {
+  const commonArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+  ];
+
+  // 1) Preferir o novo headless do Chromium real
+  try {
+    console.log("[playwright] trying launch with channel=chromium");
+    return await chromium.launch({
+      channel: "chromium",
+      headless: true,
+      args: commonArgs,
+    });
+  } catch (err) {
+    console.error("[playwright] channel=chromium failed:", err.message);
+  }
+
+  // 2) Fallback para o executável resolvido pelo próprio Playwright
+  try {
+    const executablePath = chromium.executablePath();
+    console.log("[playwright] fallback executablePath:", executablePath);
+
+    return await chromium.launch({
+      executablePath,
+      headless: true,
+      args: commonArgs,
+    });
+  } catch (err) {
+    console.error("[playwright] executablePath fallback failed:", err.message);
+    throw err;
+  }
 }
 
 // ── PDF helpers ─────────────────────────────────────────────────
@@ -490,10 +526,7 @@ app.post("/generate-pdf", async (req, res) => {
     await updateJob(supabase, jobId, { status: "running" });
     await logProgress(supabase, jobId, "Iniciando processamento...", "info");
 
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    });
+    browser = await launchChromium();
 
     context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -617,8 +650,6 @@ app.post("/generate-pdf", async (req, res) => {
       `Concluído! ${totalProcessed} páginas processadas (p${startPage} a p${lastPage}).`,
       "success"
     );
-
-    await context.close();
   } catch (err) {
     console.error("Job failed:", err);
     await updateJob(supabase, jobId, { status: "failed", error_message: err.message });
@@ -657,10 +688,7 @@ app.post("/import-questions", async (req, res) => {
 
     await logImportProgress(supabase, jobId, "Iniciando importação de questões...", "info");
 
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    });
+    browser = await launchChromium();
 
     context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
