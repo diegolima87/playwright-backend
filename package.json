@@ -1,11 +1,12 @@
 {
   "name": "playwright-pdf-maker",
+  "version": "7.0.0",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "playwright": "1.58.2",
-    "@supabase/supabase-js": "^2.39.0"
+    "@supabase/supabase-js": "^2.39.0",
+    "playwright": "1.52.0"
   }
 }
