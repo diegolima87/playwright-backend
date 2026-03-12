@@ -18,7 +18,7 @@ async function getBrowser() {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", version: "6.1", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: "6.2", timestamp: new Date().toISOString() });
 });
 
 app.post("/generate-pdf", async (req, res) => {
@@ -137,31 +137,13 @@ app.post("/generate-pdf", async (req, res) => {
       }
 
       totalGenerated++;
-      send({ type: "progress", value: totalGenerated });
-
-      const hasNextPage = await page
-        .locator(
-          'a[rel="next"], .pagination .next a, nav[aria-label="pagination"] a:has-text("›"), a:has-text("Próxima")'
-        )
-        .first()
-        .isVisible({ timeout: 3000 })
-        .catch(() => false);
-
-      if (!hasNextPage) {
-        send({
-          type: "log",
-          message: `Não há mais páginas após ${currentPage}. Finalizando.`,
-          level: "info",
-        });
-        break;
-      }
-
       currentPage++;
     }
 
+    const lastPage = currentPage - 1;
     const finalFilename = totalGenerated === 1
       ? `questoes_p${startPage}_${new Date().toISOString().slice(0, 10)}.pdf`
-      : `questoes_p${startPage}-p${currentPage}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      : `questoes_p${startPage}-p${lastPage}_${new Date().toISOString().slice(0, 10)}.pdf`;
     const finalStoragePath = `${userId}/${jobId}/${finalFilename}`;
 
     await supabase
@@ -193,4 +175,4 @@ app.post("/generate-pdf", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Server v6.1 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server v6.2 running on port ${PORT}`));
