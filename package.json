@@ -1,6 +1,7 @@
 {
-  "name": "playwright-backend",
-  "version": "6.0.0",
+  "name": "playwright-pdf-maker",
+  "version": "6.1.0",
+  "private": true,
   "scripts": {
     "start": "node server.js"
   },
