@@ -1,4 +1,4 @@
-// server.js v6.0 — Public pages, no login, paginated PDF generation
+// server.js v6.1 — Loop until no more pages
 const express = require("express");
 const { chromium } = require("playwright");
 const { createClient } = require("@supabase/supabase-js");
@@ -9,16 +9,17 @@ app.use(express.json());
 let browserInstance = null;
 
 async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) return browserInstance;
-  browserInstance = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+  if (!browserInstance || !browserInstance.isConnected()) {
+    browserInstance = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    });
+  }
   return browserInstance;
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", version: "6.0", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: "6.1", timestamp: new Date().toISOString() });
 });
 
 app.post("/generate-pdf", async (req, res) => {
@@ -30,7 +31,6 @@ app.post("/generate-pdf", async (req, res) => {
 
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-  // SSE headers
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -54,7 +54,7 @@ app.post("/generate-pdf", async (req, res) => {
     // Block heavy resources
     await page.route("**/*", (route) => {
       const type = route.request().resourceType();
-      if (["image", "media", "font", "stylesheet"].includes(type)) {
+      if (["image", "media", "font"].includes(type)) {
         return route.abort();
       }
       return route.continue();
@@ -62,60 +62,53 @@ app.post("/generate-pdf", async (req, res) => {
 
     send({ type: "log", message: "Navegador pronto.", level: "info" });
 
-    // Parse URL to detect current page number
+    // Parse starting page from URL
     const urlObj = new URL(targetUrl);
-    const startPage = parseInt(urlObj.searchParams.get("page") || "1", 10);
+    let currentPage = parseInt(urlObj.searchParams.get("page") || "1", 10);
+    let totalGenerated = 0;
 
-    // Discover total pages by visiting first page
-    send({ type: "log", message: `Acessando página ${startPage}...`, level: "pending" });
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    while (true) {
+      // Set page number in URL
+      urlObj.searchParams.set("page", String(currentPage));
+      const pageUrl = urlObj.toString();
 
-    // Dismiss cookie banners if present
-    try {
-      const cookieBtn = page.locator('button:has-text("Aceitar"), button:has-text("OK"), .cookie-consent-accept');
-      await cookieBtn.first().click({ timeout: 3000 });
-    } catch {
-      // No cookie banner
-    }
+      send({ type: "log", message: `Acessando página ${currentPage}...`, level: "pending" });
 
-    // Try to find total pages from pagination
-    let totalPages = startPage;
-    try {
-      const lastPageLink = page.locator('.pagination a, nav[aria-label="pagination"] a').last();
-      const lastPageHref = await lastPageLink.getAttribute("href", { timeout: 5000 });
-      if (lastPageHref) {
-        const lastPageUrl = new URL(lastPageHref, targetUrl);
-        const lastPageNum = parseInt(lastPageUrl.searchParams.get("page") || "1", 10);
-        if (lastPageNum > totalPages) totalPages = lastPageNum;
-      }
-    } catch {
-      // Single page or unable to detect pagination
-    }
+      await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    send({ type: "log", message: `Total de páginas detectado: ${totalPages - startPage + 1} (${startPage} a ${totalPages})`, level: "info" });
-
-    const pdfBuffers = [];
-
-    for (let currentPage = startPage; currentPage <= totalPages; currentPage++) {
-      const pageProgress = Math.round(((currentPage - startPage) / (totalPages - startPage + 1)) * 100);
-      send({ type: "progress", value: pageProgress });
-
-      // Navigate to current page
-      if (currentPage !== startPage) {
-        urlObj.searchParams.set("page", String(currentPage));
-        const pageUrl = urlObj.toString();
-        send({ type: "log", message: `Acessando página ${currentPage}/${totalPages}...`, level: "pending" });
-        await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      // Dismiss cookie banner on first page
+      if (totalGenerated === 0) {
+        try {
+          const cookieBtn = page.locator('button:has-text("Aceitar"), button:has-text("OK"), .cookie-consent-accept');
+          await cookieBtn.first().click({ timeout: 3000 });
+        } catch {
+          // No cookie banner
+        }
       }
 
-      // Wait for content to load
+      // Check if there are questions on this page
+      const hasQuestions = await page
+        .locator(".q-question-enunciation, .question-body, .q-item, .q-question-item")
+        .first()
+        .isVisible({ timeout: 10000 })
+        .catch(() => false);
+
+      if (!hasQuestions) {
+        send({ type: "log", message: `Página ${currentPage} sem questões. Finalizando.`, level: "info" });
+        break;
+      }
+
+      // Wait for content to stabilize
       try {
-        await page.waitForSelector(".q-question-enunciation, .question-body, .q-item", { timeout: 15000 });
+        await page.waitForSelector(".q-question-enunciation, .question-body, .q-item, .q-question-item", {
+          timeout: 15000,
+        });
+        await page.waitForTimeout(1000); // let rendering settle
       } catch {
         send({ type: "log", message: `Aviso: conteúdo da página ${currentPage} pode estar incompleto.`, level: "info" });
       }
 
-      // Generate PDF via page.pdf()
+      // Generate PDF
       send({ type: "log", message: `Gerando PDF da página ${currentPage}...`, level: "pending" });
       const pdfBuffer = await page.pdf({
         format: "A4",
@@ -123,37 +116,41 @@ app.post("/generate-pdf", async (req, res) => {
         margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" },
       });
 
-      pdfBuffers.push(pdfBuffer);
-
       const pageFilename = `questoes_p${currentPage}_${new Date().toISOString().slice(0, 10)}.pdf`;
-
-      // Upload individual page PDF
       const storagePath = `${userId}/${jobId}/${pageFilename}`;
-      const { error: uploadErr } = await supabase.storage
-        .from("pdfs")
-        .upload(storagePath, pdfBuffer, {
-          contentType: "application/pdf",
-          upsert: true,
-        });
+
+      const { error: uploadErr } = await supabase.storage.from("pdfs").upload(storagePath, pdfBuffer, {
+        contentType: "application/pdf",
+        upsert: true,
+      });
 
       if (uploadErr) {
         send({ type: "log", message: `Erro ao salvar página ${currentPage}: ${uploadErr.message}`, level: "error" });
       } else {
         send({ type: "page_complete", page: currentPage, filename: pageFilename });
       }
+
+      totalGenerated++;
+      send({ type: "progress", value: totalGenerated }); // incremental progress
+
+      // Check if there's a "next page" link
+      const hasNextPage = await page
+        .locator('a[rel="next"], .pagination .next a, nav[aria-label="pagination"] a:has-text("›"), a:has-text("Próxima")')
+        .first()
+        .isVisible({ timeout: 3000 })
+        .catch(() => false);
+
+      if (!hasNextPage) {
+        send({ type: "log", message: `Não há mais páginas após ${currentPage}. Finalizando.`, level: "info" });
+        break;
+      }
+
+      currentPage++;
     }
 
-    // Update job with the last page's storage path (or first)
-    const finalFilename = `questoes_${new Date().toISOString().slice(0, 10)}.pdf`;
+    // Update job record
+    const finalFilename = `questoes_p${parseInt(urlObj.searchParams.get("page") || "1", 10) - totalGenerated + 1}-p${currentPage}_${new Date().toISOString().slice(0, 10)}.pdf`;
     const finalStoragePath = `${userId}/${jobId}/${finalFilename}`;
-
-    // If only one page, use it directly. Otherwise, note multiple files uploaded.
-    if (pdfBuffers.length === 1) {
-      await supabase.storage.from("pdfs").upload(finalStoragePath, pdfBuffers[0], {
-        contentType: "application/pdf",
-        upsert: true,
-      });
-    }
 
     await supabase.from("pdf_jobs").update({
       status: "completed",
@@ -165,7 +162,7 @@ app.post("/generate-pdf", async (req, res) => {
     send({
       type: "complete",
       jobId,
-      totalPages: pdfBuffers.length,
+      totalPages: totalGenerated,
     });
 
     await context.close();
@@ -182,4 +179,4 @@ app.post("/generate-pdf", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Server v6.0 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server v6.1 running on port ${PORT}`));
