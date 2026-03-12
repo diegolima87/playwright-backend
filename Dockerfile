@@ -6,4 +6,5 @@ RUN npm install --production
 COPY . .
 
 EXPOSE 3000
+RUN npx playwright install --with-deps chromium
 CMD ["node", "server.js"]
