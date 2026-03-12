@@ -7,9 +7,12 @@ ENV PLAYWRIGHT_BROWSERS_PATH=0
 COPY package*.json ./
 RUN npm install --omit=dev
 
-RUN npx playwright install chromium --with-deps
-
 COPY . .
+
+RUN ./node_modules/.bin/playwright install chromium --with-deps
+
+# smoke test: falha no build se o browser não estiver onde o Playwright espera
+RUN node -e "const { chromium } = require('playwright'); console.log('PLAYWRIGHT EXECUTABLE:', chromium.executablePath())"
 
 EXPOSE 3000
 
