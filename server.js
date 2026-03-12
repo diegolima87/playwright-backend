@@ -1,4 +1,4 @@
-// server.js v8.1 — Playwright PDF + Question Import Backend
+// server.js v8.2 — Playwright PDF + Question Import Backend
 const express = require("express");
 const { chromium } = require("playwright");
 const { createClient } = require("@supabase/supabase-js");
@@ -7,11 +7,19 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const VERSION = "8.1.0";
+const VERSION = "8.2.0";
 
-// ── Health endpoint ─────────────────────────────────────────────
+// ── Health endpoints ────────────────────────────────────────────
+app.get("/", (_req, res) => {
+  res.status(200).send("ok");
+});
+
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", version: VERSION, timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    version: VERSION,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ── Shared helpers ──────────────────────────────────────────────
@@ -39,7 +47,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ── Playwright launcher fix for Render/Docker ───────────────────
+// ── Playwright launcher fix ─────────────────────────────────────
 async function launchChromium() {
   const commonArgs = [
     "--no-sandbox",
@@ -47,7 +55,6 @@ async function launchChromium() {
     "--disable-dev-shm-usage",
   ];
 
-  // 1) Preferir o novo headless do Chromium real
   try {
     console.log("[playwright] trying launch with channel=chromium");
     return await chromium.launch({
@@ -59,7 +66,6 @@ async function launchChromium() {
     console.error("[playwright] channel=chromium failed:", err.message);
   }
 
-  // 2) Fallback para o executável resolvido pelo próprio Playwright
   try {
     const executablePath = chromium.executablePath();
     console.log("[playwright] fallback executablePath:", executablePath);
