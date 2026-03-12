@@ -1,3 +1,4 @@
+// server.js v7.0 — Playwright PDF Generator Backend
 const express = require("express");
 const { chromium } = require("playwright");
 const { createClient } = require("@supabase/supabase-js");
@@ -5,201 +6,284 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 app.use(express.json());
 
-const VERSION = "7.0";
-const MAX_PAGES = 500;
-const QUESTION_SELECTOR = ".q-question-item, .q-item, [class*='question']";
+const PORT = process.env.PORT || 3000;
+const VERSION = "7.0.0";
 
-// Health endpoint with version
-app.get("/health", (req, res) => {
+// ── Health endpoint ─────────────────────────────────────────────
+app.get("/health", (_req, res) => {
   res.json({ status: "ok", version: VERSION, timestamp: new Date().toISOString() });
 });
 
-// Progress helper
+// ── Helper: log progress to Supabase ────────────────────────────
 async function logProgress(supabase, jobId, message, level = "info", pageNumber = null) {
-  await supabase.from("pdf_job_progress").insert({
-    job_id: jobId, message, level, page_number: pageNumber,
-  });
+  try {
+    await supabase.from("pdf_job_progress").insert({
+      job_id: jobId,
+      message,
+      level,
+      page_number: pageNumber,
+    });
+  } catch (err) {
+    console.error("logProgress error:", err.message);
+  }
 }
 
-async function updateJobProgress(supabase, jobId, currentPage, totalPages = null) {
-  const update = { current_page: currentPage, status: "running" };
-  if (totalPages) update.total_pages = totalPages;
-  await supabase.from("pdf_jobs").update(update).eq("id", jobId);
+async function updateJob(supabase, jobId, fields) {
+  try {
+    await supabase.from("pdf_jobs").update({ ...fields, updated_at: new Date().toISOString() }).eq("id", jobId);
+  } catch (err) {
+    console.error("updateJob error:", err.message);
+  }
 }
 
-// Detect total pages from pagination
+// ── Helper: detect total pages from pagination ──────────────────
 async function detectTotalPages(page) {
   try {
-    // Try multiple selectors for pagination
-    const totalFromText = await page.evaluate(() => {
-      // Pattern: "1 de 324" or "Página 1 de 324"
-      const texts = document.body.innerText;
-      const match = texts.match(/(?:de|of)\s+(\d+)\s*(?:página|page)?/i);
-      if (match) return parseInt(match[1]);
-
-      // Try pagination links
-      const links = Array.from(document.querySelectorAll('a[href*="page="], .pagination a, nav a'));
+    // Strategy 1: look for "última" or last page link
+    const lastPageNum = await page.evaluate(() => {
+      // Check pagination links for highest page number
+      const links = Array.from(document.querySelectorAll('a[href*="page="]'));
       let maxPage = 0;
       for (const link of links) {
-        const href = link.getAttribute("href") || "";
-        const pageMatch = href.match(/page=(\d+)/);
-        if (pageMatch) maxPage = Math.max(maxPage, parseInt(pageMatch[1]));
-        const textMatch = link.textContent.trim().match(/^(\d+)$/);
-        if (textMatch) maxPage = Math.max(maxPage, parseInt(textMatch[1]));
+        const match = link.href.match(/page=(\d+)/);
+        if (match) {
+          const num = parseInt(match[1], 10);
+          if (num > maxPage) maxPage = num;
+        }
       }
-      return maxPage > 0 ? maxPage : null;
+      // Also check pagination text like "1 de 24" or "Página 1 de 24"
+      const paginationText = document.body.innerText;
+      const textMatch = paginationText.match(/(?:de|of)\s+(\d+)\s*(?:página|page)?/i);
+      if (textMatch) {
+        const num = parseInt(textMatch[1], 10);
+        if (num > maxPage) maxPage = num;
+      }
+      return maxPage;
     });
-    return totalFromText;
-  } catch { return null; }
+    return lastPageNum > 0 ? lastPageNum : null;
+  } catch {
+    return null;
+  }
 }
 
-// Check if page has questions
+// ── Helper: check if page has questions ─────────────────────────
 async function pageHasQuestions(page) {
   try {
-    await page.waitForSelector(QUESTION_SELECTOR, { timeout: 10000 });
-    const count = await page.locator(QUESTION_SELECTOR).count();
+    const count = await page.evaluate(() => {
+      const selectors = [
+        ".q-question-item",
+        ".q-question",
+        '[class*="question-item"]',
+        '[class*="QuestionItem"]',
+        ".question-content",
+        '[data-testid*="question"]',
+      ];
+      for (const sel of selectors) {
+        const els = document.querySelectorAll(sel);
+        if (els.length > 0) return els.length;
+      }
+      return 0;
+    });
     return count > 0;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
+// ── Helper: extract start page from URL ─────────────────────────
+function extractStartPage(url) {
+  const match = url.match(/page=(\d+)/);
+  return match ? parseInt(match[1], 10) : 1;
+}
+
+// ── Helper: build page URL ──────────────────────────────────────
+function buildPageUrl(baseUrl, pageNum) {
+  const url = new URL(baseUrl);
+  url.searchParams.set("page", String(pageNum));
+  return url.toString();
+}
+
+// ── Helper: generate PDF for a single page with retries ─────────
+async function generatePagePdf(page, url, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+      // Wait for content to render
+      await page.waitForTimeout(2000);
+
+      // Remove ads, headers, footers for cleaner PDF
+      await page.evaluate(() => {
+        const removeSelectors = [
+          "header", "footer", "nav",
+          '[class*="ad-"]', '[class*="banner"]',
+          '[class*="cookie"]', '[id*="cookie"]',
+          '[class*="popup"]', '[class*="modal"]',
+          ".q-header", ".q-footer",
+        ];
+        for (const sel of removeSelectors) {
+          document.querySelectorAll(sel).forEach((el) => el.remove());
+        }
+      });
+
+      const pdfBuffer = await page.pdf({
+        format: "A4",
+        printBackground: true,
+        margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
+      });
+
+      return pdfBuffer;
+    } catch (err) {
+      console.error(`Page PDF attempt ${attempt} failed for ${url}:`, err.message);
+      if (attempt === retries) throw err;
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
+  }
+}
+
+// ── Main: generate-pdf endpoint ─────────────────────────────────
 app.post("/generate-pdf", async (req, res) => {
   const { jobId, targetUrl, supabaseUrl, supabaseServiceKey, userId } = req.body;
-  res.json({ status: "accepted" }); // Return immediately
 
+  if (!jobId || !targetUrl || !supabaseUrl || !supabaseServiceKey) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  // Respond immediately (fire-and-forget)
+  res.json({ status: "accepted", jobId });
+
+  // Process in background
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
-  let browser;
+  let browser = null;
 
   try {
-    await supabase.from("pdf_jobs").update({ status: "running" }).eq("id", jobId);
-    await logProgress(supabase, jobId, "Iniciando navegador...", "pending");
+    await updateJob(supabase, jobId, { status: "running" });
+    await logProgress(supabase, jobId, "Iniciando processamento...", "info");
 
-    browser = await chromium.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
-    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    });
+
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    });
+
     const page = await context.newPage();
 
-    await logProgress(supabase, jobId, "Carregando primeira página...", "pending");
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    // Navigate to first page to detect total
+    const startPage = extractStartPage(targetUrl);
+    const firstUrl = buildPageUrl(targetUrl, startPage);
+    
+    await logProgress(supabase, jobId, `Acessando página inicial (${startPage})...`, "info", startPage);
+    await page.goto(firstUrl, { waitUntil: "networkidle", timeout: 60000 });
+    await page.waitForTimeout(2000);
 
     // Detect total pages
     let totalPages = await detectTotalPages(page);
     if (totalPages) {
-      await logProgress(supabase, jobId, `Total detectado: ${totalPages} páginas`, "info");
-      await updateJobProgress(supabase, jobId, 0, totalPages);
+      await logProgress(supabase, jobId, `Total de páginas detectado: ${totalPages}`, "info");
+      await updateJob(supabase, jobId, { total_pages: totalPages });
     } else {
-      await logProgress(supabase, jobId, "Total de páginas não detectado. Continuando até encontrar páginas vazias.", "info");
+      await logProgress(supabase, jobId, "Total de páginas não detectado. Usando modo incremental.", "info");
     }
 
-    // Parse the base URL and starting page
-    const url = new URL(targetUrl);
-    const startPage = parseInt(url.searchParams.get("page") || "1");
+    // Pagination loop
     let currentPage = startPage;
     let consecutiveEmpty = 0;
-    const uploadedPaths = [];
+    const MAX_PAGES = 500;
+    const pdfPaths = [];
+    const dateStr = new Date().toISOString().slice(0, 10);
 
-    while (consecutiveEmpty < 2 && currentPage - startPage < MAX_PAGES) {
-      const pageUrl = new URL(targetUrl);
-      pageUrl.searchParams.set("page", String(currentPage));
-
-      await logProgress(supabase, jobId, `Processando página ${currentPage}...`, "pending", currentPage);
-      await updateJobProgress(supabase, jobId, currentPage - startPage + 1, totalPages);
-
-      let hasQuestions = false;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          if (currentPage > startPage || attempt > 1) {
-            await page.goto(pageUrl.toString(), { waitUntil: "domcontentloaded", timeout: 60000 });
-          }
-          hasQuestions = await pageHasQuestions(page);
-          if (hasQuestions) break;
-          if (attempt < 3) {
-            await logProgress(supabase, jobId, `Página ${currentPage}: tentativa ${attempt} sem questões, retentando...`, "info", currentPage);
-            await page.waitForTimeout(2000);
-          }
-        } catch (err) {
-          if (attempt < 3) {
-            await logProgress(supabase, jobId, `Página ${currentPage}: erro na tentativa ${attempt}, retentando...`, "info", currentPage);
-            await page.waitForTimeout(3000);
-          }
-        }
+    while (consecutiveEmpty < 2 && (currentPage - startPage) < MAX_PAGES) {
+      // Check total_pages limit
+      if (totalPages && currentPage > totalPages) {
+        await logProgress(supabase, jobId, `Todas as ${totalPages} páginas processadas.`, "success");
+        break;
       }
 
-      if (!hasQuestions) {
-        consecutiveEmpty++;
-        await logProgress(supabase, jobId, `Página ${currentPage}: sem questões (${consecutiveEmpty}/2 consecutivas)`, "info", currentPage);
-        currentPage++;
-        continue;
-      }
+      const pageUrl = buildPageUrl(targetUrl, currentPage);
+      await logProgress(supabase, jobId, `Processando página ${currentPage}${totalPages ? ` de ${totalPages}` : ""}...`, "info", currentPage);
+      await updateJob(supabase, jobId, { current_page: currentPage });
 
-      consecutiveEmpty = 0;
-
-      // Re-detect total if not found
-      if (!totalPages && currentPage === startPage) {
-        totalPages = await detectTotalPages(page);
-        if (totalPages) {
-          await logProgress(supabase, jobId, `Total detectado: ${totalPages} páginas`, "info");
-          await updateJobProgress(supabase, jobId, currentPage - startPage + 1, totalPages);
-        }
-      }
-
-      // Generate PDF for this page
       try {
-        const pdfBuffer = await page.pdf({ format: "A4", printBackground: true, margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" } });
-        const date = new Date().toISOString().slice(0, 10);
-        const storagePath = `${userId}/questoes_p${currentPage}_${date}.pdf`;
+        // Generate PDF for this page
+        const pdfBuffer = await generatePagePdf(page, pageUrl);
 
+        // Check if page has questions
+        await page.goto(pageUrl, { waitUntil: "networkidle", timeout: 60000 });
+        await page.waitForTimeout(1500);
+        const hasQuestions = await pageHasQuestions(page);
+
+        if (!hasQuestions) {
+          consecutiveEmpty++;
+          await logProgress(supabase, jobId, `Página ${currentPage}: sem questões encontradas (${consecutiveEmpty}/2 vazias consecutivas).`, "info", currentPage);
+          currentPage++;
+          continue;
+        }
+
+        // Reset empty counter
+        consecutiveEmpty = 0;
+
+        // Upload individual page PDF
+        const pagePath = `${userId}/questoes_p${currentPage}_${dateStr}.pdf`;
         const { error: uploadError } = await supabase.storage
           .from("pdfs")
-          .upload(storagePath, pdfBuffer, { contentType: "application/pdf", upsert: true });
+          .upload(pagePath, pdfBuffer, {
+            contentType: "application/pdf",
+            upsert: true,
+          });
 
         if (uploadError) {
-          await logProgress(supabase, jobId, `Página ${currentPage}: erro no upload - ${uploadError.message}`, "error", currentPage);
+          await logProgress(supabase, jobId, `Erro ao salvar PDF da página ${currentPage}: ${uploadError.message}`, "error", currentPage);
         } else {
-          uploadedPaths.push(storagePath);
-          await logProgress(supabase, jobId, `Página ${currentPage}: PDF gerado e salvo ✓`, "success", currentPage);
+          pdfPaths.push(pagePath);
+          await logProgress(supabase, jobId, `Página ${currentPage} salva com sucesso.`, "success", currentPage);
+        }
+
+        // Re-detect total pages if not yet known
+        if (!totalPages) {
+          const detected = await detectTotalPages(page);
+          if (detected) {
+            totalPages = detected;
+            await updateJob(supabase, jobId, { total_pages: totalPages });
+            await logProgress(supabase, jobId, `Total de páginas atualizado: ${totalPages}`, "info");
+          }
         }
       } catch (err) {
-        await logProgress(supabase, jobId, `Página ${currentPage}: erro ao gerar PDF - ${err.message}`, "error", currentPage);
-      }
-
-      // Check if we reached the detected total
-      if (totalPages && currentPage >= totalPages + startPage - 1) {
-        await logProgress(supabase, jobId, `Alcançou a última página detectada (${totalPages})`, "info");
-        break;
+        await logProgress(supabase, jobId, `Erro na página ${currentPage}: ${err.message}`, "error", currentPage);
+        consecutiveEmpty++;
       }
 
       currentPage++;
     }
 
-    await browser.close();
-    browser = null;
+    // Final status
+    const totalProcessed = pdfPaths.length;
+    const lastPage = currentPage - 1;
+    const finalFilename = `questoes_p${startPage}-p${lastPage}_${dateStr}.pdf`;
+    const finalPath = pdfPaths.length > 0 ? pdfPaths[pdfPaths.length - 1] : null;
 
-    const totalProcessed = uploadedPaths.length;
-    const date = new Date().toISOString().slice(0, 10);
-    const finalFilename = totalProcessed > 1
-      ? `questoes_p${startPage}-p${currentPage - consecutiveEmpty}_${date}.pdf`
-      : `questoes_p${startPage}_${date}.pdf`;
-    const finalPath = uploadedPaths.length > 0 ? uploadedPaths[uploadedPaths.length - 1] : null;
-
-    await supabase.from("pdf_jobs").update({
+    await updateJob(supabase, jobId, {
       status: "completed",
       filename: finalFilename,
       storage_path: finalPath,
-      current_page: totalProcessed,
-      total_pages: totalProcessed,
-    }).eq("id", jobId);
+      current_page: lastPage,
+      total_pages: totalPages || lastPage,
+    });
 
-    await logProgress(supabase, jobId, `Concluído! ${totalProcessed} página(s) processada(s).`, "success");
+    await logProgress(supabase, jobId, `Concluído! ${totalProcessed} páginas processadas (p${startPage} a p${lastPage}).`, "success");
 
+    await context.close();
   } catch (err) {
-    console.error("Job error:", err);
-    await supabase.from("pdf_jobs").update({
-      status: "failed", error_message: err.message,
-    }).eq("id", jobId);
-    await logProgress(supabase, jobId, `Erro fatal: ${err.message}`, "error");
+    console.error("Job failed:", err);
+    await updateJob(supabase, jobId, { status: "failed", error_message: err.message });
+    await logProgress(supabase, jobId, `Falha no processamento: ${err.message}`, "error");
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Server v${VERSION} listening on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`PDF Generator Backend v${VERSION} running on port ${PORT}`);
+});
