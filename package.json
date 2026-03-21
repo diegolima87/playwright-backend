@@ -1,6 +1,6 @@
 {
   "name": "playwright-pdf-maker",
-  "version": "8.2.2",
+  "version": "8.2.3",
   "private": true,
   "main": "server.js",
   "scripts": {
