@@ -1,19 +1,19 @@
-FROM node:20-bookworm-slim
+FROM node:20-bookworm
 
 WORKDIR /app
 
+ENV NODE_ENV=production
 ENV PLAYWRIGHT_BROWSERS_PATH=0
+ENV PORT=10000
 
 COPY package*.json ./
-RUN npm install --omit=dev
+
+RUN npm install
 
 COPY . .
 
-RUN ./node_modules/.bin/playwright install chromium --with-deps
+RUN npx playwright install --with-deps chromium
 
-# smoke test: falha no build se o browser não estiver onde o Playwright espera
-RUN node -e "const { chromium } = require('playwright'); console.log('PLAYWRIGHT EXECUTABLE:', chromium.executablePath())"
+EXPOSE 10000
 
-EXPOSE 3000
-
-CMD ["node", "server.js"]
+CMD ["npm", "start"]
