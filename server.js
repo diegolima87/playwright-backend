@@ -1,5 +1,6 @@
 require("dotenv").config();
 
+const fs = require("node:fs");
 const express = require("express");
 const cors = require("cors");
 const { chromium } = require("playwright");
@@ -7,7 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = Number(process.env.PORT || 10000);
-const VERSION = "8.2.2";
+const VERSION = "8.2.3";
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -36,6 +37,10 @@ async function addJobLog(supabase, jobId, message, level = "info", pageNumber = 
 }
 
 async function updateJob(supabase, jobId, patch) {
+  if (patch.status) {
+    console.log(`UPDATING JOB STATUS: ${patch.status}`);
+  }
+
   const { error } = await supabase.from("pdf_jobs").update(patch).eq("id", jobId);
   if (error) {
     throw new Error(`Erro ao atualizar job: ${error.message}`);
@@ -51,6 +56,7 @@ app.get("/health", async (_req, res) => {
       service: "pdf-generator-backend",
       version: VERSION,
       playwrightExecutable: executablePath,
+      executableExists: Boolean(executablePath && fs.existsSync(executablePath)),
       browsersPathEnv: process.env.PLAYWRIGHT_BROWSERS_PATH || null,
     });
   } catch (error) {
@@ -83,7 +89,6 @@ app.post("/generate-pdf", async (req, res) => {
   try {
     const supabase = getSupabaseAdmin(supabaseUrl, supabaseServiceKey);
 
-    console.log("UPDATING JOB STATUS: running");
     await updateJob(supabase, jobId, {
       status: "running",
       error_message: null,
@@ -94,6 +99,11 @@ app.post("/generate-pdf", async (req, res) => {
     const resolvedExecutablePath = chromium.executablePath();
     console.log("PLAYWRIGHT EXECUTABLE:", resolvedExecutablePath);
     console.log("PLAYWRIGHT_BROWSERS_PATH:", process.env.PLAYWRIGHT_BROWSERS_PATH || "(not set)");
+    console.log("PLAYWRIGHT EXECUTABLE EXISTS:", fs.existsSync(resolvedExecutablePath));
+
+    if (!resolvedExecutablePath || !fs.existsSync(resolvedExecutablePath)) {
+      throw new Error(`Chromium não encontrado no caminho esperado: ${resolvedExecutablePath}`);
+    }
 
     browser = await chromium.launch({
       headless: true,
@@ -120,10 +130,8 @@ app.post("/generate-pdf", async (req, res) => {
     await page.waitForTimeout(3000);
 
     await addJobLog(supabase, jobId, "Página carregada com sucesso.");
-
     await addJobLog(supabase, jobId, "Processamento base concluído.");
 
-    console.log("UPDATING JOB STATUS: completed");
     await updateJob(supabase, jobId, {
       status: "completed",
       error_message: null,
@@ -147,7 +155,6 @@ app.post("/generate-pdf", async (req, res) => {
         "error"
       );
 
-      console.log("UPDATING JOB STATUS: failed");
       await updateJob(supabase, jobId, {
         status: "failed",
         error_message: error.message,
