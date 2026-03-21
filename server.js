@@ -7,7 +7,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = Number(process.env.PORT || 10000);
-const VERSION = "8.2.1";
+const VERSION = "8.2.2";
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -83,8 +83,9 @@ app.post("/generate-pdf", async (req, res) => {
   try {
     const supabase = getSupabaseAdmin(supabaseUrl, supabaseServiceKey);
 
+    console.log("UPDATING JOB STATUS: running");
     await updateJob(supabase, jobId, {
-      status: "processing",
+      status: "running",
       error_message: null,
     });
 
@@ -120,22 +121,9 @@ app.post("/generate-pdf", async (req, res) => {
 
     await addJobLog(supabase, jobId, "Página carregada com sucesso.");
 
-    // ==========================================================
-    // MANTENHA AQUI A SUA LÓGICA REAL DE SCRAPING / PDF / UPLOAD
-    // ==========================================================
-    // Exemplo:
-    // 1. paginar conteúdo
-    // 2. montar PDF
-    // 3. enviar para Supabase Storage
-    // 4. atualizar storage_path / total_pages / etc.
-    //
-    // O ponto crítico corrigido aqui é:
-    // - PLAYWRIGHT_BROWSERS_PATH=0 no Dockerfile
-    // - executablePath: chromium.executablePath() no launch
-    // ==========================================================
-
     await addJobLog(supabase, jobId, "Processamento base concluído.");
 
+    console.log("UPDATING JOB STATUS: completed");
     await updateJob(supabase, jobId, {
       status: "completed",
       error_message: null,
@@ -159,6 +147,7 @@ app.post("/generate-pdf", async (req, res) => {
         "error"
       );
 
+      console.log("UPDATING JOB STATUS: failed");
       await updateJob(supabase, jobId, {
         status: "failed",
         error_message: error.message,
