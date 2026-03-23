@@ -1,16 +1,14 @@
 {
-  "name": "playwright-pdf-maker",
-  "version": "8.2.3",
-  "private": true,
+  "name": "pdf-generator-backend",
+  "version": "8.2.4",
+  "description": "Backend para geração de PDFs com Playwright",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.8",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "playwright": "^1.51.1",
     "express": "^4.21.2",
-    "playwright": "^1.51.1"
+    "@supabase/supabase-js": "^2.49.1"
   }
 }
