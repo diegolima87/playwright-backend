@@ -1,179 +1,112 @@
 const express = require("express");
-const fs = require("fs");
 const { chromium } = require("playwright");
 const { createClient } = require("@supabase/supabase-js");
+const fs = require("fs");
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 
 const VERSION = "8.2.4";
-const PORT = process.env.PORT || 3000;
 
-// ─── Health ────────────────────────────────────────────────────────
 app.get("/health", (_req, res) => {
-  let execPath = "";
-  let execExists = false;
-
-  try {
-    execPath = chromium.executablePath();
-    execExists = fs.existsSync(execPath);
-  } catch (e) {
-    execPath = `error: ${e.message}`;
-  }
-
+  const execPath = chromium.executablePath();
+  const exists = fs.existsSync(execPath);
   res.json({
-    ok: execExists,
+    ok: exists,
     service: "pdf-generator-backend",
     version: VERSION,
     playwrightExecutable: execPath,
-    executableExists: execExists,
-    browsersPathEnv: process.env.PLAYWRIGHT_BROWSERS_PATH ?? "not set",
+    executableExists: exists,
+    browsersPathEnv: process.env.PLAYWRIGHT_BROWSERS_PATH || "not set",
   });
 });
 
-// ─── Generate PDF ──────────────────────────────────────────────────
 app.post("/generate-pdf", async (req, res) => {
   const { jobId, targetUrl, supabaseUrl, supabaseServiceKey, userId } = req.body;
 
-  if (!jobId || !targetUrl || !supabaseUrl || !supabaseServiceKey || !userId) {
+  if (!jobId || !targetUrl || !supabaseUrl || !supabaseServiceKey) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
+  res.json({ ok: true, message: "Job accepted" });
+
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-  const log = async (message, level = "info", pageNumber = null) => {
+  const logProgress = async (message, level = "info") => {
     console.log(`[${level}] Job ${jobId}: ${message}`);
     try {
       await supabase.from("pdf_job_progress").insert({
         job_id: jobId,
         message,
         level,
-        page_number: pageNumber,
       });
     } catch (e) {
       console.error("Log insert error:", e.message);
     }
   };
 
-  // Respond immediately — processing continues in background
-  res.json({ ok: true, jobId });
-
   let browser = null;
-
   try {
-    // Update job to running
     await supabase.from("pdf_jobs").update({ status: "running" }).eq("id", jobId);
-    await log("Iniciando navegador...");
+    await logProgress("Iniciando navegador...");
 
-    const resolvedExecutablePath = chromium.executablePath();
-    const execExists = fs.existsSync(resolvedExecutablePath);
+    const resolvedPath = chromium.executablePath();
+    const pathExists = fs.existsSync(resolvedPath);
+    await logProgress(
+      `PLAYWRIGHT_BROWSERS_PATH=${process.env.PLAYWRIGHT_BROWSERS_PATH || "not set"}, ` +
+      `executablePath=${resolvedPath}, exists=${pathExists}`
+    );
 
-    console.log("PLAYWRIGHT_BROWSERS_PATH =", process.env.PLAYWRIGHT_BROWSERS_PATH);
-    console.log("chromium.executablePath() =", resolvedExecutablePath);
-    console.log("executable exists =", execExists);
-
-    if (!execExists) {
-      throw new Error(
-        `Chromium binary not found at ${resolvedExecutablePath}. ` +
-        `PLAYWRIGHT_BROWSERS_PATH=${process.env.PLAYWRIGHT_BROWSERS_PATH}`
-      );
+    if (!pathExists) {
+      throw new Error(`Chromium not found at ${resolvedPath}`);
     }
 
     browser = await chromium.launch({
       headless: true,
-      executablePath: resolvedExecutablePath,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--single-process",
-      ],
+      executablePath: resolvedPath,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
     });
 
-    await log("Navegador iniciado com sucesso.");
-
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    });
-
+    const context = await browser.newContext();
     const page = await context.newPage();
-    await log("Acessando página...");
 
-    await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 60000 });
-    await log("Página carregada. Gerando PDF...");
-
-    // Update total pages (simple: 1 for now)
-    await supabase
-      .from("pdf_jobs")
-      .update({ total_pages: 1, current_page: 1 })
-      .eq("id", jobId);
+    await logProgress(`Navegando para ${targetUrl}...`);
+    await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 120000 });
+    await logProgress("Página carregada. Gerando PDF...");
 
     const pdfBuffer = await page.pdf({
       format: "A4",
       printBackground: true,
-      margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
+      margin: { top: "20px", bottom: "20px", left: "20px", right: "20px" },
     });
 
-    await log("PDF gerado. Fazendo upload...");
+    await logProgress(`PDF gerado (${(pdfBuffer.length / 1024).toFixed(1)} KB). Enviando...`);
 
-    const filename = `questoes_${new Date().toISOString().slice(0, 10)}.pdf`;
-    const storagePath = `${userId}/${jobId}/${filename}`;
+    const filename = `questoes_${new Date().toISOString().slice(0, 10)}_${jobId.slice(0, 8)}.pdf`;
+    const storagePath = `${userId}/${filename}`;
 
     const { error: uploadError } = await supabase.storage
       .from("pdfs")
-      .upload(storagePath, pdfBuffer, {
-        contentType: "application/pdf",
-        upsert: true,
-      });
+      .upload(storagePath, pdfBuffer, { contentType: "application/pdf", upsert: true });
 
-    if (uploadError) {
-      throw new Error(`Upload failed: ${uploadError.message}`);
-    }
+    if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
+
+    const { data: urlData } = supabase.storage.from("pdfs").getPublicUrl(storagePath);
 
     await supabase
       .from("pdf_jobs")
-      .update({
-        status: "done",
-        storage_path: storagePath,
-        filename,
-      })
+      .update({ status: "done", storage_path: storagePath, filename })
       .eq("id", jobId);
 
-    await log("Concluído com sucesso!");
-
-    await context.close();
+    await logProgress("Concluído com sucesso!");
   } catch (err) {
-    const errorMessage = err.message || String(err);
-    console.error(`Job ${jobId} failed:`, errorMessage);
-
-    await log(`Erro fatal: ${errorMessage}`, "error");
-
-    await supabase
-      .from("pdf_jobs")
-      .update({ status: "failed", error_message: errorMessage })
-      .eq("id", jobId);
+    console.error(`Job ${jobId} failed:`, err.message);
+    await logProgress(`Erro: ${err.message}`, "error");
+    await supabase.from("pdf_jobs").update({ status: "failed", error_message: err.message }).eq("id", jobId);
   } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
-    }
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
-// ─── Start ─────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`pdf-generator-backend v${VERSION} listening on port ${PORT}`);
-  console.log("PLAYWRIGHT_BROWSERS_PATH =", process.env.PLAYWRIGHT_BROWSERS_PATH);
-
-  try {
-    const ep = chromium.executablePath();
-    console.log("chromium.executablePath() =", ep);
-    console.log("executable exists =", fs.existsSync(ep));
-  } catch (e) {
-    console.error("chromium.executablePath() error:", e.message);
-  }
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Backend v${VERSION} on port ${PORT}`));
