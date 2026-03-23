@@ -1,17 +1,16 @@
 FROM node:20-bookworm-slim
 
+ENV PLAYWRIGHT_BROWSERS_PATH=0
+ENV NODE_ENV=production
+
 WORKDIR /app
 
-ENV NODE_ENV=production
-ENV PLAYWRIGHT_BROWSERS_PATH=0
-
 COPY package*.json ./
+RUN npm ci
 
-RUN npm install --omit=dev
 RUN npx playwright install --with-deps chromium
 
 COPY . .
 
-EXPOSE 10000
-
+EXPOSE 3000
 CMD ["npm", "start"]
