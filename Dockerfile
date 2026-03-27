@@ -4,7 +4,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=0
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY package.json ./
 RUN npm install
 
 RUN npx playwright install --with-deps chromium
